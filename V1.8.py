@@ -1,3 +1,4 @@
+import math
 import time
 from influxdb import InfluxDBClient as InfluxDBClientV1
 from influxdb_client import  InfluxDBClient as InfluxDBClientV2 , OrganizationsApi, BucketsApi,Point, WriteApi
@@ -8,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.exceptions import ReadTimeoutError
 from pprint import pprint
 
-from secrets import INFLUXDB_V1_HOST, INFLUXDB_V1_PORT, INFLUXDB_V1_DATABASE, INFLUXDB_V2_URL, INFLUXDB_V2_TOKEN, INFLUXDB_V2_ORG
+from project_secrets import INFLUXDB_V1_HOST, INFLUXDB_V1_PORT, INFLUXDB_V1_DATABASE, INFLUXDB_V2_URL, INFLUXDB_V2_TOKEN, INFLUXDB_V2_ORG
+
 
 
 
@@ -89,18 +91,17 @@ def write_batch(measurement, start_dt, end_dt, bucket_name, time_format, retry_a
                 time.sleep(retry_delay)  # Wait before retrying
 
 def batch_write_data(measurement, start_time, end_time, bucket_name, concurrency=5):
-    time_format = '%Y-%m-%dT%H:%M:%S.%fZ'
-    start_dt = datetime.strptime(start_time, time_format)
-    end_dt = datetime.strptime(end_time, time_format)
+    start_dt, start_format = parse_datetime(start_time)
+    end_dt, _ = parse_datetime(end_time)
     delta = timedelta(minutes=5)  # Changed to 6-hour increments time out at 30 minutes
 
     total_duration = end_dt - start_dt
-    total_periods = total_duration.total_seconds() / (6 * 60 * 60)
+    total_periods = math.ceil(total_duration.total_seconds() / delta.total_seconds())
     futures = []
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         while start_dt < end_dt:
             next_dt = min(start_dt + delta, end_dt)  # Ensure we do not go beyond end_dt
-            future = executor.submit(write_batch, measurement, start_dt, next_dt, bucket_name, time_format)
+            future = executor.submit(write_batch, measurement, start_dt, next_dt, bucket_name, start_format)
             #future = executor.submit(test_write_top_10_data(measurement,bucket_name))
             futures.append(future)
             start_dt = next_dt
@@ -109,7 +110,7 @@ def batch_write_data(measurement, start_time, end_time, bucket_name, concurrency
         for future in as_completed(futures):
             completed_batches += 1
             progress = (completed_batches / total_periods) * 100
-            print(f"Progress: {progress:.2f}% completed")
+            print(f"Progress: {progress:.2f}% completed fro measurment {measurement}")
             try:
                 future.result()  # This will re-raise any exceptions caught in the thread
             except Exception as e:
@@ -124,6 +125,20 @@ def get_last_entry_date_from_v2(bucket_name):
         return results[0].records[0].get_time()
     return None
 
+def parse_datetime(datetime_str):
+    format_with_fractional_seconds = '%Y-%m-%dT%H:%M:%S.%fZ'
+    format_without_fractional_seconds = '%Y-%m-%dT%H:%M:%SZ'
+    
+    try:
+        # Try parsing with fractional seconds
+        parsed_datetime = datetime.strptime(datetime_str, format_with_fractional_seconds)
+        used_format = format_with_fractional_seconds
+    except ValueError:
+        # If that fails, try without fractional seconds
+        parsed_datetime = datetime.strptime(datetime_str, format_without_fractional_seconds)
+        used_format = format_without_fractional_seconds
+    
+    return parsed_datetime, used_format
 
 measurements = client_v1.query('SHOW MEASUREMENTS').get_points()
 measurement_names = [measurement['name'] for measurement in measurements]
