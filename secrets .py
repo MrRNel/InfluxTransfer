@@ -1,0 +1,10 @@
+# .gitignore
+# InfluxDB v1.8 Configuration
+INFLUXDB_V1_HOST = '10.10.10.9'
+INFLUXDB_V1_PORT = 8086
+INFLUXDB_V1_DATABASE = 'Chronos'
+
+# InfluxDB v2.7 Configuration
+INFLUXDB_V2_URL = 'http://192.168.10.5:8086'
+INFLUXDB_V2_TOKEN = 'Zt8KBrPWKcU7OVjpwCzaFu-6IU9yQO5bd48V8HUZT1Ax7ckgx8GKQ74UuqCjiNj_fWlrwNNc8LWrFay_aR99qw=='
+INFLUXDB_V2_ORG = '7ec637b4be25b989'
