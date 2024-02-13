@@ -1,19 +1,25 @@
 import math
 import time
+import pytz
+import logging
+import State
 from influxdb import InfluxDBClient as InfluxDBClientV1
 from influxdb_client import  InfluxDBClient as InfluxDBClientV2 , OrganizationsApi, BucketsApi,Point, WriteApi
 from influxdb_client.client.write_api import SYNCHRONOUS
 from datetime import datetime, timedelta
-import pytz
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.exceptions import ReadTimeoutError
 from pprint import pprint
-
 from project_secrets import INFLUXDB_V1_HOST, INFLUXDB_V1_PORT, INFLUXDB_V1_DATABASE, INFLUXDB_V2_URL, INFLUXDB_V2_TOKEN, INFLUXDB_V2_ORG
 
-
-
-
+now = datetime.now()
+# Initialize the Logger
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[
+                        logging.FileHandler(f"migration_log{now.strftime('%Y-%m-%d')}.log"),  # Log messages to this file
+                        logging.StreamHandler()  # Keep logging to the console as well
+                    ])
 
 # Configuration for InfluxDB v1.8
 INFLUXDB_V1_HOST = INFLUXDB_V1_HOST
@@ -51,8 +57,7 @@ def get_time_range_for_measurement(measurement):
     latest_time = list(latest_time_query.get_points())[0]['time']
     return earliest_time, latest_time
 
-def write_batch(measurement, start_dt, end_dt, bucket_name, time_format, retry_attempts=3, retry_delay=2):
-    print(f"{start_dt.strftime('%Y-%m-%d %H:%M:%S')} transfer has started.")  # Print start message
+def write_batch(measurement, start_dt, end_dt, bucket_name, time_format, retry_attempts=5, retry_delay=2):    
     query = f'SELECT * FROM "{measurement}" WHERE time >= \'{start_dt.strftime(time_format)}\' AND time < \'{end_dt.strftime(time_format)}\''
     #query = f'SELECT * FROM "{measurement}" ORDER BY time ASC LIMIT 1'    
     results = client_v1.query(query)
@@ -77,44 +82,39 @@ def write_batch(measurement, start_dt, end_dt, bucket_name, time_format, retry_a
     
     for attempt in range(1, retry_attempts + 1):
         try:
-            if points:
-                for point in points:                    
-                    write_api.write(bucket=bucket_name, org=INFLUXDB_V2_ORG, record=point)
-            print(f"{start_dt.strftime('%Y-%m-%d %H:%M:%S')} to {end_dt.strftime('%Y-%m-%d %H:%M:%S')} transfer is completed.")
+            if points:                
+                 write_api.write(bucket=bucket_name, org=INFLUXDB_V2_ORG, record=points)                 
+                 #logging.info(f"Completed data transfer for {measurement} on {start_dt.strftime('%Y-%m-%dT%H:%M:%S')}.") # Enable this only for debugging 
             break  # Exit the loop if write succeeds
         except ReadTimeoutError:
             if attempt == retry_attempts:
-                print(f"Failed to write data for {start_dt.strftime('%Y-%m-%d %H:%M:%S')} after {retry_attempts} attempts.")
+                State.add_writeobj(measurement, start_dt, end_dt, bucket_name, time_format)
+                logging.error(f"Failed to write data for {measurement} on {start_dt.strftime('%Y-%m-%d %H:%M:%S')} after {retry_attempts} attempts.")
                 raise  # Reraise the exception if the last attempt fails
             else:
-                print(f"Attempt {attempt} failed for {start_dt.strftime('%Y-%m-%d %H:%M:%S')}, retrying in {retry_delay} seconds...")
+                logging.info(f"Retry attempt {attempt} for {measurement} entry: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} after delay.")
                 time.sleep(retry_delay)  # Wait before retrying
 
 def batch_write_data(measurement, start_time, end_time, bucket_name, concurrency=5):
     start_dt, start_format = parse_datetime(start_time)
     end_dt, _ = parse_datetime(end_time)
-    delta = timedelta(minutes=5)  # Changed to 6-hour increments time out at 30 minutes
+    delta = timedelta(minutes=3) if measurement == 'Single' else timedelta(minutes=5)  # Changed to 6-hour increments time out at 30 minutes
 
-    total_duration = end_dt - start_dt
-    total_periods = math.ceil(total_duration.total_seconds() / delta.total_seconds())
     futures = []
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         while start_dt < end_dt:
             next_dt = min(start_dt + delta, end_dt)  # Ensure we do not go beyond end_dt
+            #logging.info(f"Processing data for {measurement} on {start_dt.strftime('%Y-%m-%dT%H:%M:%S')}.") # Enable this only when debuging 
             future = executor.submit(write_batch, measurement, start_dt, next_dt, bucket_name, start_format)
             #future = executor.submit(test_write_top_10_data(measurement,bucket_name))
             futures.append(future)
-            start_dt = next_dt
-        
-        completed_batches = 0
+            start_dt = next_dt        
         for future in as_completed(futures):
-            completed_batches += 1
-            progress = (completed_batches / total_periods) * 100
-            print(f"Progress: {progress:.2f}% completed fro measurment {measurement}")
             try:
                 future.result()  # This will re-raise any exceptions caught in the thread
             except Exception as e:
-                print(f"An error occurred: {e}")
+                State.add_writeobj(measurement, start_dt, end_dt, bucket_name, start_format)
+                logging.error(f"An error occurred: {e}")
 
 
 def get_last_entry_date_from_v2(bucket_name):
@@ -143,8 +143,15 @@ def parse_datetime(datetime_str):
 measurements = client_v1.query('SHOW MEASUREMENTS').get_points()
 measurement_names = [measurement['name'] for measurement in measurements]
 
+if State.writeObjs:
+    while State.writeObjs:
+        obj = State.pop_writeobj()
+        bucket = get_or_create_bucket(obj.measurement)
+        batch_write_data(obj.measurement, obj.start_dt, obj.end_dt, bucket.name, concurrency=1)       
+
 for measurement in measurement_names:
-    
+    logging.info(f"Starting migration for measurement: {measurement}")
+
     bucket = get_or_create_bucket(measurement)
         
     last_entry_date_v2 = get_last_entry_date_from_v2(bucket.name)
@@ -157,10 +164,11 @@ for measurement in measurement_names:
         start_time_v1, _ = get_time_range_for_measurement(measurement)
         start_time = start_time_v1
     
-    
+
     _, end_time = get_time_range_for_measurement(measurement)
-      
+    
     batch_write_data(measurement, start_time, end_time, bucket.name, concurrency=5)
+    logging.info(f"Completed migration for measurement: {measurement}")
 
 
 # for measurement in measurement_names:

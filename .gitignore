@@ -1,1 +1,4 @@
 project_secrets.py
+*.json
+*.log
+__pycache__
