@@ -3,6 +3,7 @@ import time
 import pytz
 import logging
 import State
+import json
 from influxdb import InfluxDBClient as InfluxDBClientV1
 from influxdb_client import  InfluxDBClient as InfluxDBClientV2 , OrganizationsApi, BucketsApi,Point, WriteApi
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -10,7 +11,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.exceptions import ReadTimeoutError
 from pprint import pprint
-from project_secrets import INFLUXDB_V1_HOST, INFLUXDB_V1_PORT, INFLUXDB_V1_DATABASE, INFLUXDB_V2_URL, INFLUXDB_V2_TOKEN, INFLUXDB_V2_ORG
+from project_secrets import INFLUXDB_V1_HOST, INFLUXDB_V1_PORT, INFLUXDB_V1_DATABASE, INFLUXDB_V2_URL, INFLUXDB_V2_TOKEN, INFLUXDB_V2_ORG, BUSINESS_NAME, ADMIN_EMAIL_RECIPIENTS
+from email_sender import send_email
 
 now = datetime.now()
 # Initialize the Logger
@@ -149,32 +151,83 @@ if State.writeObjs:
         bucket = get_or_create_bucket(obj.measurement)
         batch_write_data(obj.measurement, obj.start_dt, obj.end_dt, bucket.name, concurrency=1)       
 
-for measurement in measurement_names:
-    logging.info(f"Starting migration for measurement: {measurement}")
-
-    bucket = get_or_create_bucket(measurement)
-        
-    last_entry_date_v2 = get_last_entry_date_from_v2(bucket.name)
-        
-    if last_entry_date_v2:
-        start_time_v2 = last_entry_date_v2.strftime('%Y-%m-%dT%H:%M:%SZ')
-        start_time = start_time_v2
-    else:
-    
-        start_time_v1, _ = get_time_range_for_measurement(measurement)
-        start_time = start_time_v1
-    
-
-    _, end_time = get_time_range_for_measurement(measurement)
-    
-    batch_write_data(measurement, start_time, end_time, bucket.name, concurrency=5)
-    logging.info(f"Completed migration for measurement: {measurement}")
-
-
 # for measurement in measurement_names:
-#     bucket = get_or_create_bucket(measurement)
-#     earliest_time, latest_time = get_time_range_for_measurement(measurement)
-#     batch_write_data(measurement, earliest_time, latest_time, bucket.name, concurrency=5)
-#      # Use the test function for writing top 10 data points
-#     #test_write_top_10_data(measurement, bucket.name)
+#     logging.info(f"Starting migration for measurement: {measurement}")
 
+#     bucket = get_or_create_bucket(measurement)
+        
+#     last_entry_date_v2 = get_last_entry_date_from_v2(bucket.name)
+        
+#     if last_entry_date_v2:
+#         start_time_v2 = last_entry_date_v2.strftime('%Y-%m-%dT%H:%M:%SZ')
+#         start_time = start_time_v2
+#     else:
+    
+#         start_time_v1, _ = get_time_range_for_measurement(measurement)
+#         start_time = start_time_v1
+    
+
+#     _, end_time = get_time_range_for_measurement(measurement)
+    
+#     batch_write_data(measurement, start_time, end_time, bucket.name, concurrency=5)
+#     logging.info(f"Completed migration for measurement: {measurement}")
+
+
+def main():
+    measurements = client_v1.query('SHOW MEASUREMENTS').get_points()
+    measurement_names = [measurement['name'] for measurement in measurements]
+
+    if State.writeObjs:
+        while State.writeObjs:
+            obj = State.pop_writeobj()
+            bucket = get_or_create_bucket(obj.measurement)
+            batch_write_data(obj.measurement, obj.start_dt, obj.end_dt, bucket.name, concurrency=1)       
+
+    for measurement in measurement_names:
+        logging.info(f"Starting migration for measurement: {measurement}")
+
+        bucket = get_or_create_bucket(measurement)
+            
+        last_entry_date_v2 = get_last_entry_date_from_v2(bucket.name)
+            
+        if last_entry_date_v2:
+            start_time_v2 = last_entry_date_v2.strftime('%Y-%m-%dT%H:%M:%SZ')
+            start_time = start_time_v2
+        else:
+        
+            start_time_v1, _ = get_time_range_for_measurement(measurement)
+            start_time = start_time_v1
+        
+
+        _, end_time = get_time_range_for_measurement(measurement)
+        
+        batch_write_data(measurement, start_time, end_time, bucket.name, concurrency=5)
+        emailReport(count_objects_in_json())
+        logging.info(f"Completed migration for measurement: {measurement}")
+
+
+def emailReport(failuresCount, measurement):
+    current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+    email_subject = f'{BUSINESS_NAME} Report'
+    email_body = f"""
+    Hi,
+
+    REPLICATION of Measurment: {measurement}
+    REPLICATION Ran on: {current_date}
+    REPLICATION Failures: {failuresCount} please see the log file and json file if any failures exist.
+
+    Best Regards
+    {BUSINESS_NAME} Automation
+    """
+
+    # Send a single email with all the attached reports
+    if send_email(ADMIN_EMAIL_RECIPIENTS, email_subject, email_body, adminEmail=True):
+        print(f'Email sent successfully to {", ".join(ADMIN_EMAIL_RECIPIENTS)}')
+
+
+
+def count_objects_in_json():
+    file_path = 'writeobj.json'  # Assuming the file is always in the root folder
+    with open(file_path, 'r') as file:
+        data = json.load(file)
+        return len(data) if isinstance(data, list) else 0
